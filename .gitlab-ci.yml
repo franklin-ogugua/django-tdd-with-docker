@@ -1,0 +1,75 @@
+image: docker:stable
+
+stages:
+  - build
+  - test
+  - deploy
+
+variables:
+  IMAGE: ${CI_REGISTRY}/${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME}
+
+build:
+  stage: build
+  services:
+    - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  script:
+    - cd app
+    - docker login -u $CI_REGISTRY_USER -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker pull $IMAGE:latest || true
+    - echo $SECRET_KEY
+    - docker build
+        --cache-from $IMAGE:latest
+        --cache-from $IMAGE:builder
+        --tag $IMAGE:latest
+        --file ./Dockerfile.prod
+        --build-arg SECRET_KEY=$SECRET_KEY
+        "."
+    - docker push $IMAGE:latest
+
+test:
+  stage: test
+  image: $IMAGE:latest
+  services:
+    - postgres:latest
+  variables:
+    POSTGRES_DB: users
+    POSTGRES_USER: runner
+    POSTGRES_PASSWORD: runner
+    DATABASE_TEST_URL: postgresql://runner:runner@postgres:5432/users
+  script:
+    - cd app
+    - python3.10 -m venv env
+    - source env/bin/activate
+    - pip install -r requirements.txt
+    - pip install black==21.12b0 flake8==4.0.1 isort==5.10.1 pytest==6.2.5 pytest-django==4.5.2
+    - export DEBUG=1
+    - pytest -p no:warnings
+    - flake8 .
+    - black . --check --exclude="migrations|env"
+    - isort . --check-only --skip env
+    - export DEBUG=0
+    - python manage.py check --deploy --fail-level=WARNING
+
+deploy:
+  stage: deploy
+  services:
+    - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay2
+    HEROKU_APP_NAME: pacific-hamlet-44773
+    HEROKU_REGISTRY_IMAGE: registry.heroku.com/${HEROKU_APP_NAME}/web
+  script:
+    - apk add --no-cache curl
+    - cd app
+    - docker build
+        --tag $HEROKU_REGISTRY_IMAGE
+        --file ./Dockerfile.prod
+        --build-arg SECRET_KEY=$SECRET_KEY
+        "."
+    - docker login -u _ -p $HEROKU_AUTH_TOKEN registry.heroku.com
+    - docker push $HEROKU_REGISTRY_IMAGE
+    - cd ..
+    - chmod +x ./release.sh
+    - ./release.sh
